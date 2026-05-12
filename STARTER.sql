@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS plans (
   id SERIAL PRIMARY KEY,
-  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  telegram_id BIGINT REFERENCES users(telegram_id) ON DELETE CASCADE,
   content TEXT NOT NULL,
   plan_type TEXT,
   is_completed BOOLEAN DEFAULT false,

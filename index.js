@@ -229,8 +229,8 @@ bot.hears('📋 Rejalarim', async (ctx) => {
       return;
     }
 
-    // plans.user_id stores the Telegram ID (not the DB serial id)
-    const plansRes = await db.query('SELECT id, content, plan_type, is_completed, created_at FROM plans WHERE user_id = $1 AND is_completed = false ORDER BY created_at DESC', [telegramId]);
+  // plans.telegram_id stores the Telegram ID
+  const plansRes = await db.query('SELECT id, content, plan_type, is_completed, created_at FROM plans WHERE telegram_id = $1 AND is_completed = false ORDER BY created_at DESC', [telegramId]);
     if (plansRes.rowCount === 0) {
       await ctx.reply('Sizda hozircha faol (active) rejalar mavjud emas.');
       return;
@@ -299,10 +299,10 @@ bot.on('message', async (ctx) => {
     if (planType === 'yillik') planType = 'yearly';
     if (!['daily', 'monthly', 'yearly'].includes(planType)) planType = 'daily';
 
-    console.log('Saving plan', { telegramId: from.id, planType, content });
+  console.log('Saving plan', { telegramId: from.id, planType, content });
 
-    // Use the Telegram ID as plans.user_id (your schema references users(telegram_id))
-    await db.query('INSERT INTO plans (user_id, content, plan_type) VALUES ($1, $2, $3)', [from.id, content, planType]);
+  // Use the Telegram ID as plans.telegram_id (your schema references users(telegram_id))
+  await db.query('INSERT INTO plans (telegram_id, content, plan_type) VALUES ($1, $2, $3)', [from.id, content, planType]);
 
     await ctx.reply('Reja saqlandi.');
     userStates.delete(from.id);
@@ -319,7 +319,7 @@ bot.command('clear', async (ctx) => {
   const from = ctx.from;
   if (!from) return;
   try {
-    await db.query('DELETE FROM plans WHERE user_id = $1 AND is_completed = true', [from.id]);
+  await db.query('DELETE FROM plans WHERE telegram_id = $1 AND is_completed = true', [from.id]);
     await ctx.reply('Barcha bajatilgan (completed) rejalar o\'chirildi.');
   } catch (err) {
     console.error('Error clearing completed plans:', err);
@@ -353,10 +353,10 @@ bot.catch((err) => {
         console.log('Running daily archive job...');
         // Mark daily plans created before today as completed
         const res = await db.query(
-          "UPDATE plans SET is_completed = true WHERE plan_type = 'daily' AND is_completed = false AND created_at < date_trunc('day', NOW()) RETURNING user_id"
+          "UPDATE plans SET is_completed = true WHERE plan_type = 'daily' AND is_completed = false AND created_at < date_trunc('day', NOW()) RETURNING telegram_id"
         );
-        const userIds = [...new Set(res.rows.map(r => r.user_id))];
-        for (const tg of userIds) {
+        const telegramIds = [...new Set(res.rows.map(r => r.telegram_id))];
+        for (const tg of telegramIds) {
           // plans.user_id stores Telegram IDs now, send directly
           try {
             await bot.api.sendMessage(tg, "Yangi kun boshlandi! Kechagi rejalaringiz arxivga o'tkazildi.");
@@ -375,10 +375,10 @@ bot.catch((err) => {
         console.log('Running monthly archive job...');
         // Mark monthly plans created before the first day of this month as completed
         const res = await db.query(
-          "UPDATE plans SET is_completed = true WHERE plan_type = 'monthly' AND is_completed = false AND created_at < date_trunc('month', NOW()) RETURNING user_id"
+          "UPDATE plans SET is_completed = true WHERE plan_type = 'monthly' AND is_completed = false AND created_at < date_trunc('month', NOW()) RETURNING telegram_id"
         );
-        const userIds = [...new Set(res.rows.map(r => r.user_id))];
-        for (const tg of userIds) {
+        const telegramIds = [...new Set(res.rows.map(r => r.telegram_id))];
+        for (const tg of telegramIds) {
           try {
             await bot.api.sendMessage(tg, "Yangi oy boshlandi! O'tgan oy rejalaringiz arxivga o'tkazildi.");
           } catch (sendErr) {
@@ -396,10 +396,10 @@ bot.catch((err) => {
         console.log('Running yearly archive job...');
         // Mark yearly plans created before the first day of this year as completed
         const res = await db.query(
-          "UPDATE plans SET is_completed = true WHERE plan_type = 'yearly' AND is_completed = false AND created_at < date_trunc('year', NOW()) RETURNING user_id"
+          "UPDATE plans SET is_completed = true WHERE plan_type = 'yearly' AND is_completed = false AND created_at < date_trunc('year', NOW()) RETURNING telegram_id"
         );
-        const userIds = [...new Set(res.rows.map(r => r.user_id))];
-        for (const tg of userIds) {
+        const telegramIds = [...new Set(res.rows.map(r => r.telegram_id))];
+        for (const tg of telegramIds) {
           try {
             await bot.api.sendMessage(tg, "Yangi yil boshlandi! O'tgan yil rejalaringiz arxivga o'tkazildi.");
           } catch (sendErr) {

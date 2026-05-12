@@ -1,0 +1,19 @@
+{
+  "name": "smart-planner-bot",
+  "version": "0.1.0",
+  "description": "Telegram bot to save daily, monthly, and yearly goals with subscription paywall.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.3",
+    "grammy": "^1.12.0",
+    "node-cron": "^4.2.1",
+    "pg": "^8.10.0"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

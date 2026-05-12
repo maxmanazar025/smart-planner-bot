@@ -101,17 +101,23 @@ bot.command('start', async (ctx) => {
   const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ');
 
   try {
-    const res = await db.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
-    if (res.rowCount === 0) {
-      // subscription_status is a BOOLEAN in the DB; use false for new users
-      await db.query(
-        'INSERT INTO users (telegram_id, full_name, subscription_status, created_at) VALUES ($1, $2, $3, NOW())',
-        [telegramId, fullName || null, false]
-      );
+    // Try to insert the user atomically. If a user with the same telegram_id exists, do nothing.
+    const insertRes = await db.query(
+      'INSERT INTO users (telegram_id, full_name, subscription_status, created_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (telegram_id) DO NOTHING RETURNING id',
+      [telegramId, fullName || null, false]
+    );
 
+    if (insertRes.rowCount > 0) {
       await ctx.reply(`Welcome, ${fullName || 'there'}! Your account has been created. Use /help to see available commands.`);
     } else {
-      await ctx.reply(`Welcome back, ${fullName || 'there'}!`);
+      // User already exists (or was inserted concurrently); confirm existence and welcome back.
+      const res = await db.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
+      if (res.rowCount === 0) {
+        // This is unexpected, but handle gracefully by informing the user.
+        await ctx.reply(`Welcome, ${fullName || 'there'}! Your account creation is pending. Please try again.`);
+      } else {
+        await ctx.reply(`Welcome back, ${fullName || 'there'}!`);
+      }
     }
   } catch (err) {
     console.error('DB error in /start handler:', err);

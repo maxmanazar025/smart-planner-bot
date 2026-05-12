@@ -17,6 +17,9 @@ const bot = new Bot(token);
 // Structure: Map<telegramId, { expecting: 'plan', plan_type: 'daily'|'monthly'|'yearly' }>
 const userStates = new Map();
 
+// Extended state: when user submits text, we ask for priority before saving.
+// state = { expecting: 'plan', plan_type, pendingContent }
+
 // Main menu keyboard (shown to subscribed users)
 const mainMenu = {
   reply_markup: {
@@ -283,6 +286,12 @@ bot.on('message', async (ctx) => {
     return;
   }
 
+  // Validate length
+  if (content.length > 500) {
+    await ctx.reply('Iltimos, reja matni 500 belgidan kam bo\'lsin.');
+    return;
+  }
+
   // persist plan
   try {
     const userRes = await db.query('SELECT id FROM users WHERE telegram_id = $1', [from.id]);
@@ -299,33 +308,134 @@ bot.on('message', async (ctx) => {
     if (planType === 'yillik') planType = 'yearly';
     if (!['daily', 'monthly', 'yearly'].includes(planType)) planType = 'daily';
 
-    console.log('Saving plan', { telegramId: from.id, planType, content });
-
-    // Use the Telegram ID as plans.telegram_id (your schema references users(telegram_id))
-    const insertRes = await db.query(
-      'INSERT INTO plans (telegram_id, content, plan_type) VALUES ($1, $2, $3) RETURNING id',
-      [from.id, content, planType]
-    );
-
-    const planId = insertRes.rows[0] && insertRes.rows[0].id;
-
-    // Send a message with inline buttons to mark complete or delete
-    const inlineKeyboard = {
+    // Ask for priority before saving
+    userStates.set(from.id, { expecting: 'priority', plan_type: planType, pendingContent: content });
+    const prioKb = {
       reply_markup: {
         inline_keyboard: [[
-          { text: '✅ Bajarildi', callback_data: `complete:${planId}` },
-          { text: "🗑 O'chirish", callback_data: `delete:${planId}` }
+          { text: '🔴 Muhim', callback_data: 'priority:high' },
+          { text: '🟡 O\'rtacha', callback_data: 'priority:medium' },
+          { text: '🟢 Oddiy', callback_data: 'priority:low' }
         ]]
       }
     };
-
-    await ctx.reply('Reja saqlandi.', inlineKeyboard);
-    userStates.delete(from.id);
+    await ctx.reply('Bu vazifa qanchalik muhim?', prioKb);
+    // do not delete the state here; wait for the priority callback to save the plan
   } catch (err) {
     // Print the exact DB error to the terminal for debugging
     console.error(err);
     await ctx.reply('Rejani saqlashda xatolik yuz berdi. Iltimos, keyinroq urinib ko\'ring.');
     userStates.delete(from.id);
+  }
+});
+
+// /ai command - analyze current active plans and return a 2-sentence motivational/advice message
+bot.command('ai', async (ctx) => {
+  const from = ctx.from;
+  if (!from) return;
+  const telegramId = from.id;
+  try {
+    const plansRes = await db.query('SELECT content, plan_type FROM plans WHERE telegram_id = $1 AND is_completed = false ORDER BY created_at ASC', [telegramId]);
+    if (plansRes.rowCount === 0) {
+      await ctx.reply('Faol rejalar topilmadi. Iltimos avval reja qo\'shing.');
+      return;
+    }
+
+    const tasksSummary = plansRes.rows.map((p, i) => `${i + 1}. (${p.plan_type}) ${p.content}`).join('\n');
+
+    // If GEMINI_API_KEY is not set, fallback to a simple heuristic reply
+    if (!process.env.GEMINI_API_KEY) {
+      const summary = tasksSummary;
+      await ctx.reply(`Sizning aktiv rejalaringiz:\n${summary}\n\nQisqacha maslahat: tanlang eng muhim bir vazifani va uni 25 daqiqaga ajrating (Pomodoro).`);
+      return;
+    }
+
+  // Build a concise prompt asking for exactly two sentences in Uzbek
+  const prompt = `Siz do'stona mahsuldorlik murabbiyisiz. Quyidagi vazifalar ro'yxatini hisobga olgan holda, aniq va qisqa ikki jumlali motivatsion/maslahat xabarini yuboring (raqamlash yoki qo'shimcha sharh qo'shmang). Vazifalar:\n${tasksSummary}\n\nIltimos, javobni aniq ikkita jumlada yuboring va javob O'zbek tilida bo'lsin.`;
+
+    // Try to load a supported client library. Support either '@google-ai/generativelanguage' or 'google-generative-ai'.
+    let TextServiceClient = null;
+    try {
+      TextServiceClient = require('@google-ai/generativelanguage').TextServiceClient;
+    } catch (e1) {
+      try {
+        TextServiceClient = require('google-generative-ai').TextServiceClient;
+      } catch (e2) {
+        TextServiceClient = null;
+      }
+    }
+
+    if (!TextServiceClient) {
+      await ctx.reply('AI kutubxonasi o\'rnatilmagan. Iltimos `npm install @google-ai/generativelanguage` (yoki `google-generative-ai`) deb o\'rnatib, qaytadan urinib ko\'ring.');
+      return;
+    }
+
+    try {
+      const client = new TextServiceClient({ apiKey: process.env.GEMINI_API_KEY });
+
+      // Try a few invocation shapes depending on client version. We stop at the first successful non-empty result.
+      let aiResponse = null;
+
+      // 1) generateText with model + input or prompt
+      try {
+        if (client.generateText) {
+          // some clients accept { model, input } or { model, prompt }
+          try {
+            aiResponse = await client.generateText({ model: 'models/text-bison-001', input: prompt });
+          } catch (e) {
+            aiResponse = await client.generateText({ model: 'models/text-bison-001', prompt });
+          }
+        }
+      } catch (errGen) {
+        // ignore and try next
+      }
+
+      // 2) generate (alternative name)
+      if (!aiResponse && client.generate) {
+        try { aiResponse = await client.generate({ model: 'models/text-bison-001', prompt }); } catch (e) { /* ignore */ }
+      }
+
+      // 3) some clients return an array or different wrapper
+      if (!aiResponse && typeof client === 'function') {
+        try { aiResponse = await client(prompt); } catch (e) { /* ignore */ }
+      }
+
+      // Extract text from the various possible response shapes
+      let advice = '';
+      if (aiResponse) {
+        // common shapes
+        advice = aiResponse.text || aiResponse.output || aiResponse.content || '';
+        if (!advice) {
+          if (aiResponse.result && aiResponse.result.candidates && aiResponse.result.candidates[0]) {
+            advice = aiResponse.result.candidates[0].content || aiResponse.result.candidates[0].message || '';
+          }
+          if (!advice && aiResponse.candidates && aiResponse.candidates[0]) {
+            const cand = aiResponse.candidates[0];
+            advice = cand.output?.[0]?.content || cand.content || cand.message?.content || '';
+          }
+        }
+      }
+
+      // As a last resort, stringify a small portion of the response
+      if (!advice) advice = (typeof aiResponse === 'string' ? aiResponse : JSON.stringify(aiResponse)).slice(0, 1000);
+
+      // Ensure we send only two sentences. Split on punctuation while preserving sentences.
+      const sentenceMatch = advice.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [advice];
+      const twoSentences = sentenceMatch.slice(0, 2).join(' ').trim();
+
+      // If model returned nothing meaningful, fallback to heuristic
+      if (!twoSentences || twoSentences.length === 0) {
+        await ctx.reply('AI javob bera olmadi. Mana qisqacha maslahat: tanlang eng muhim vazifa va unga 25 daqiqa bag\'ishlang.');
+      } else {
+        await ctx.reply(twoSentences);
+      }
+    } catch (aiErr) {
+      console.error('Gemini AI error:', aiErr);
+      await ctx.reply('AI yordamida tahlil qilishda xatolik yuz berdi. Iltimos keyinroq urinib ko\'ring.');
+    }
+  } catch (err) {
+    console.error('Error in /ai handler:', err);
+    await ctx.reply('AI tahlilida xatolik yuz berdi.');
   }
 });
 
@@ -343,8 +453,18 @@ bot.command('clear', async (ctx) => {
 });
 
 bot.hears('🗑 Tozalash', async (ctx) => {
-  // Mirror /clear button
-  await bot.invoke(ctx.update, ctx);
+  const from = ctx.from;
+  if (!from) return;
+  // Ask the user to confirm archive/delete options
+  await ctx.reply('Tozalash: nimani xohlaysiz?', {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '✅ Arxivlanganlarni o\'chirish', callback_data: 'archive:confirm' }],
+        [{ text: '❌ Bajarilmaganlarni o\'chirish', callback_data: 'archive:delete_uncompleted' }],
+        [{ text: '↩️ Bekor qilish', callback_data: 'archive:cancel' }]
+      ]
+    }
+  });
 });
 
 bot.catch((err) => {
@@ -400,6 +520,90 @@ bot.on('callback_query:data', async (ctx) => {
   } catch (err) {
     console.error('Error handling callback query:', err);
     await ctx.answerCallbackQuery({ text: 'Xatolik yuz berdi.' });
+  }
+});
+
+// Additional callback handling: priority selection and archive confirmation
+bot.on('callback_query:data', async (ctx) => {
+  const data = ctx.callbackQuery.data || '';
+  const from = ctx.from;
+  if (!from) return ctx.answerCallbackQuery({ text: 'Foydalanuvchi aniqlanmadi.' });
+  const telegramId = from.id;
+
+  // priority:high|medium|low
+  if (data.startsWith('priority:')) {
+    const priority = data.split(':')[1];
+    const state = userStates.get(telegramId);
+    if (!state || state.expecting !== 'priority') {
+      await ctx.answerCallbackQuery({ text: 'Hech qanday reja kutilmayapti.' });
+      return;
+    }
+
+    const content = state.pendingContent;
+    const planType = state.plan_type || 'daily';
+    try {
+      const insertRes = await db.query('INSERT INTO plans (telegram_id, content, plan_type, priority) VALUES ($1, $2, $3, $4) RETURNING id', [telegramId, content, planType, priority]);
+      const planId = insertRes.rows[0].id;
+      // edit the priority prompt message to confirm
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, undefined, `Reja saqlandi. Priority: ${priority}`);
+      } catch (e) {
+        await ctx.reply(`Reja saqlandi. Priority: ${priority}`);
+      }
+      // send inline buttons for task management
+      await ctx.reply('Bajarish imkoniyatlari:', {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Bajarildi', callback_data: `complete:${planId}` },
+            { text: "🗑 O'chirish", callback_data: `delete:${planId}` }
+          ]]
+        }
+      });
+      userStates.delete(telegramId);
+      await ctx.answerCallbackQuery({ text: 'Reja saqlandi.' });
+    } catch (err) {
+      console.error('Error saving plan with priority:', err);
+      await ctx.answerCallbackQuery({ text: 'Rejani saqlashda xatolik yuz berdi.' });
+    }
+    return;
+  }
+
+  // archive:confirm and archive:delete_uncompleted
+  if (data === 'archive:confirm') {
+    try {
+      const delRes = await db.query('DELETE FROM plans WHERE telegram_id = $1 AND is_completed = true RETURNING id', [telegramId]);
+      const count = delRes.rowCount;
+      await ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, undefined, `Arxivlandi: ${count} ta reja o'chirildi.`);
+      await ctx.answerCallbackQuery({ text: `${count} ta rejalar arxivlandi.` });
+    } catch (err) {
+      console.error('Error archiving completed plans:', err);
+      await ctx.answerCallbackQuery({ text: 'Arxivlashda xatolik yuz berdi.' });
+    }
+    return;
+  }
+
+  if (data === 'archive:delete_uncompleted') {
+    try {
+      const delRes = await db.query('DELETE FROM plans WHERE telegram_id = $1 AND is_completed = false RETURNING id', [telegramId]);
+      const count = delRes.rowCount;
+      await ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, undefined, `O'chirildi: ${count} ta bajarilmagan reja o'chirildi.`);
+      await ctx.answerCallbackQuery({ text: `${count} ta bajarilmagan reja o'chirildi.` });
+    } catch (err) {
+      console.error('Error deleting uncompleted plans:', err);
+      await ctx.answerCallbackQuery({ text: 'O\'chirishda xatolik yuz berdi.' });
+    }
+    return;
+  }
+
+  if (data === 'archive:cancel') {
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, undefined, 'Tozalash bekor qilindi.');
+      await ctx.answerCallbackQuery({ text: 'Bekor qilindi.' });
+    } catch (err) {
+      console.error('Error handling archive cancel:', err);
+      await ctx.answerCallbackQuery({ text: 'Bekor qilishda xatolik.' });
+    }
+    return;
   }
 });
 

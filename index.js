@@ -299,12 +299,27 @@ bot.on('message', async (ctx) => {
     if (planType === 'yillik') planType = 'yearly';
     if (!['daily', 'monthly', 'yearly'].includes(planType)) planType = 'daily';
 
-  console.log('Saving plan', { telegramId: from.id, planType, content });
+    console.log('Saving plan', { telegramId: from.id, planType, content });
 
-  // Use the Telegram ID as plans.telegram_id (your schema references users(telegram_id))
-  await db.query('INSERT INTO plans (telegram_id, content, plan_type) VALUES ($1, $2, $3)', [from.id, content, planType]);
+    // Use the Telegram ID as plans.telegram_id (your schema references users(telegram_id))
+    const insertRes = await db.query(
+      'INSERT INTO plans (telegram_id, content, plan_type) VALUES ($1, $2, $3) RETURNING id',
+      [from.id, content, planType]
+    );
 
-    await ctx.reply('Reja saqlandi.');
+    const planId = insertRes.rows[0] && insertRes.rows[0].id;
+
+    // Send a message with inline buttons to mark complete or delete
+    const inlineKeyboard = {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Bajarildi', callback_data: `complete:${planId}` },
+          { text: "🗑 O'chirish", callback_data: `delete:${planId}` }
+        ]]
+      }
+    };
+
+    await ctx.reply('Reja saqlandi.', inlineKeyboard);
     userStates.delete(from.id);
   } catch (err) {
     // Print the exact DB error to the terminal for debugging
@@ -334,6 +349,58 @@ bot.hears('🗑 Tozalash', async (ctx) => {
 
 bot.catch((err) => {
   console.error('Bot error:', err);
+});
+
+// Handle inline callback queries for completing or deleting plans
+bot.on('callback_query:data', async (ctx) => {
+  const data = ctx.callbackQuery.data || '';
+  const from = ctx.from;
+  if (!from) return ctx.answerCallbackQuery({ text: 'Foydalanuvchi aniqlanmadi.' });
+
+  const telegramId = from.id;
+  const [action, idStr] = data.split(':');
+  const planId = Number(idStr);
+  if (!planId) return ctx.answerCallbackQuery({ text: "Noto'g'ri reja ID." });
+
+  try {
+    // Verify plan belongs to this user
+    const planRes = await db.query('SELECT id, telegram_id, content, is_completed FROM plans WHERE id = $1', [planId]);
+    if (planRes.rowCount === 0) {
+      await ctx.answerCallbackQuery({ text: "Reja topilmadi." });
+      return;
+    }
+
+    const plan = planRes.rows[0];
+    if (String(plan.telegram_id) !== String(telegramId)) {
+      await ctx.answerCallbackQuery({ text: "Bu rejaga ruxsatingiz yo'q." });
+      return;
+    }
+
+    if (action === 'complete') {
+      await db.query('UPDATE plans SET is_completed = true WHERE id = $1', [planId]);
+      // Edit original message to say task completed
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, undefined, `Tabriklayman! Vazifa bajarildi\n\n${escapeHtml(plan.content)}`);
+      } catch (e) {
+        // Fallback: answer callback and send a new message
+        await ctx.reply(`Tabriklayman! Vazifa bajarildi\n\n${escapeHtml(plan.content)}`);
+      }
+  await ctx.answerCallbackQuery({ text: "Vazifa belgilandi: bajarildi" });
+    } else if (action === 'delete') {
+      await db.query('DELETE FROM plans WHERE id = $1', [planId]);
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, ctx.callbackQuery.message.message_id, undefined, `Vazifa o'chirildi\n\n${escapeHtml(plan.content)}`);
+      } catch (e) {
+        await ctx.reply(`Vazifa o'chirildi\n\n${escapeHtml(plan.content)}`);
+      }
+  await ctx.answerCallbackQuery({ text: "Vazifa o'chirildi" });
+    } else {
+      await ctx.answerCallbackQuery({ text: "Noma'lum amal." });
+    }
+  } catch (err) {
+    console.error('Error handling callback query:', err);
+    await ctx.answerCallbackQuery({ text: 'Xatolik yuz berdi.' });
+  }
 });
 
 (async () => {

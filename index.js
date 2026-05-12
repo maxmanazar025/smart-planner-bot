@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const { Bot } = require('grammy');
+const http = require('http');
 const db = require('./db');
 const cron = require('node-cron');
 
@@ -314,6 +315,13 @@ bot.catch((err) => {
 (async () => {
   try {
     console.log('Starting Smart Planner Bot...');
+    // Simple HTTP server for Render (or other hosts) to detect an open port
+    const port = process.env.PORT || 3000;
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Bot is running');
+    });
+    server.listen(port, () => console.log(`HTTP server listening on ${port}`));
     // Schedule cron jobs
     // Daily at 00:00 - archive yesterday's daily plans
     cron.schedule('0 0 * * *', async () => {

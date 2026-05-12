@@ -36,6 +36,17 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;');
 }
 
+// Helper to coerce various DB representations into a boolean
+function parseBool(val) {
+  if (val === true || val === 1 || val === '1') return true;
+  if (val === false || val === 0 || val === '0') return false;
+  if (typeof val === 'string') {
+    const v = val.toLowerCase();
+    return v === 'true' || v === 't' || v === 'yes' || v === 'y' || v === '1';
+  }
+  return Boolean(val);
+}
+
 // Subscription-check middleware
 bot.use(async (ctx, next) => {
   try {
@@ -57,8 +68,8 @@ bot.use(async (ctx, next) => {
       return; // stop further middleware/handlers
     }
 
-    const user = res.rows[0];
-    const isSubscribed = user.subscription_status === true;
+  const user = res.rows[0];
+  const isSubscribed = parseBool(user.subscription_status);
 
     // If there's an end date and it's passed, expire the subscription
     if (user.subscription_end_date && new Date(user.subscription_end_date) < new Date()) {
@@ -125,12 +136,19 @@ bot.command('pay', async (ctx) => {
       return;
     }
 
-    await db.query(
-      "UPDATE users SET subscription_status = $1, subscription_end_date = NOW() + INTERVAL '30 days' WHERE telegram_id = $2",
+    const upd = await db.query(
+      "UPDATE users SET subscription_status = $1, subscription_end_date = NOW() + INTERVAL '30 days' WHERE telegram_id = $2 RETURNING subscription_status, subscription_end_date",
       [true, telegramId]
     );
 
-    await ctx.reply('✅ To\'lov muvaffaqiyatli! Endi rejalaringizni boshqarishingiz mumkin.', mainMenu);
+    const newStatus = upd.rows[0] && parseBool(upd.rows[0].subscription_status);
+    console.log('Updated subscription for', telegramId, 'status:', upd.rows[0]);
+
+    if (newStatus) {
+      await ctx.reply('✅ To\'lov muvaffaqiyatli! Endi rejalaringizni boshqarishingiz mumkin.', mainMenu);
+    } else {
+      await ctx.reply('To\'lov amalga oshirildi, ammo serverda holat yangilanmadi. Iltimos keyinroq tekshiring.');
+    }
   } catch (err) {
     console.error('DB error in /pay handler:', err);
     await ctx.reply('To\'lovni amalga oshirishda xatolik yuz berdi. Iltimos, keyinroq urinib ko\'ring.');
